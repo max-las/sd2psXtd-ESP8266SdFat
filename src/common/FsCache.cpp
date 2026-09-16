@@ -48,7 +48,8 @@ uint8_t* FsCache::prepare(uint32_t sector, uint8_t option) {
   m_status |= option & CACHE_STATUS_MASK;
   return m_buffer;
 
- fail:
+  fail:
+  m_error = true;
   return nullptr;
 }
 //------------------------------------------------------------------------------
@@ -71,5 +72,6 @@ bool FsCache::sync() {
   return true;
 
  fail:
+  m_error = true;
   return false;
 }

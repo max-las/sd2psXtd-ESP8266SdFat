@@ -22,27 +22,82 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
+#define DBG_FILE "FsVolume.cpp"
 #include "FsLib.h"
+#include "../common/VolumeLocator.h"
+#include "../common/DebugMacros.h"
 FsVolume* FsVolume::m_cwv = nullptr;
 //------------------------------------------------------------------------------
+void FsVolume::end() {
+  if (m_cwv == this) {
+    m_cwv = nullptr;
+  }
+  if (m_fVol) {
+    m_fVol->~FatVolume();
+    m_fVol = nullptr;
+  } else if (m_xVol) {
+    m_xVol->~ExFatVolume();
+    m_xVol = nullptr;
+  }
+  m_blockDev = nullptr;
+  m_initError = FsInitError::NoSupportedFileSystem;
+}
+//------------------------------------------------------------------------------
 bool FsVolume::begin(BlockDevice* blockDev) {
+  end();
+  if (!blockDev) {
+    m_initError = FsInitError::CardError;
+    return false;
+  }
   m_blockDev = blockDev;
-  m_fVol = nullptr;
-  m_xVol = new (m_volMem) ExFatVolume;
-  if (m_xVol && m_xVol->begin(m_blockDev, false)) {
-    goto done;
+  m_initError = FsInitError::NoSupportedFileSystem;
+
+  bool sawCandidate = false;
+  bool sawCardError = false;
+  uint64_t searchIndex = 0;
+  while (true) {
+    VolumeLocation loc;
+    VolumeFindError err = VolumeFindError::None;
+    if (!findMountableVolume(m_blockDev, &loc, &err, &searchIndex)) {
+      if (err == VolumeFindError::CardError) {
+        sawCardError = true;
+      } else if (err == VolumeFindError::CorruptPartitionTable) {
+        m_initError = FsInitError::CorruptPartitionTable;
+        return false;
+      }
+      break;
+    }
+    sawCandidate = true;
+    if (loc.type == VolumeFsType::ExFat) {
+      m_xVol = new (m_volMem) ExFatVolume;
+      if (m_xVol->beginAt(m_blockDev, loc.firstSector,
+                          loc.sectorCount, false)) {
+        DBG_LOG("exFAT volume mounted");
+        goto done;
+      }
+      sawCardError |= m_xVol->hasError();
+      m_xVol->~ExFatVolume();
+      m_xVol = nullptr;
+    } else {
+      m_fVol = new (m_volMem) FatVolume;
+      if (m_fVol->beginAt(m_blockDev, loc.firstSector,
+                          loc.sectorCount, false)) {
+        DBG_LOG("FAT volume mounted");
+        goto done;
+      }
+      sawCardError |= m_fVol->hasError();
+      m_fVol->~FatVolume();
+      m_fVol = nullptr;
+    }
   }
-  m_xVol = nullptr;
-  m_fVol = new (m_volMem) FatVolume;
-  if (m_fVol && m_fVol->begin(m_blockDev, false)) {
-    goto done;
-  }
-  m_cwv = nullptr;
-  m_fVol = nullptr;
+  m_initError = sawCardError ? FsInitError::CardError :
+                sawCandidate ? FsInitError::CorruptPartitionTable :
+                               FsInitError::NoSupportedFileSystem;
   return false;
 
  done:
   m_cwv = this;
+  m_initError = FsInitError::OK;
   return true;
 }
 //------------------------------------------------------------------------------

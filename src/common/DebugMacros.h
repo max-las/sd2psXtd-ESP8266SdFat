@@ -29,8 +29,15 @@
 // 0 - disable, 1 - fail, halt 2 - fail, halt, warn
 #define USE_DBG_MACROS 0
 
-#if USE_DBG_MACROS
+#ifndef USE_DBG_LOG
+#define USE_DBG_LOG 0
+#endif
+
+#if USE_DBG_MACROS || USE_DBG_LOG
 #include "Arduino.h"
+#endif
+
+#if USE_DBG_MACROS
 #ifndef DBG_FILE
 #error DBG_FILE not defined
 #endif  // DBG_FILE
@@ -71,4 +78,21 @@ __attribute__((unused)) static void dbgWarn(uint16_t line) {
 #define DBG_WARN_MACRO
 #define DBG_WARN_IF(b)
 #endif  // USE_DBG_MACROS > 1
+
+#if USE_DBG_LOG
+#ifndef DBG_FILE
+#define DBG_FILE "unknown"
+#endif  // DBG_FILE
+__attribute__((unused)) static void dbgLog(const char* file, uint16_t line, const char* msg) {
+  Serial.print(F("DBG_LOG: "));
+  Serial.print(file);
+  Serial.print(':');
+  Serial.print(line);
+  Serial.print(' ');
+  Serial.println(msg);
+}
+#define DBG_LOG(msg) dbgLog(DBG_FILE, __LINE__, msg)
+#else  // USE_DBG_LOG
+#define DBG_LOG(msg)
+#endif  // USE_DBG_LOG
 #endif  // DebugMacros_h

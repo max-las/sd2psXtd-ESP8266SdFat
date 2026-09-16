@@ -49,6 +49,7 @@
 template <class Vol>
 class SdBase : public Vol {
  public:
+  ~SdBase() {Vol::end();}
   //----------------------------------------------------------------------------
   /** Initialize SD card and file system.
    *
@@ -80,7 +81,8 @@ class SdBase : public Vol {
    * \return true for success or false for failure.
    */
   bool begin(SdSpiConfig spiConfig) {
-    return cardBegin(spiConfig) && Vol::begin(m_card);
+    Vol::end();
+    return cardBegin(spiConfig) ? Vol::begin(m_card) : Vol::begin(nullptr);
   }
   //---------------------------------------------------------------------------
   /** Initialize SD card and file system for SDIO mode.
@@ -89,7 +91,8 @@ class SdBase : public Vol {
    * \return true for success or false for failure.
    */
   bool begin(SdioConfig sdioConfig) {
-    return cardBegin(sdioConfig) && Vol::begin(m_card);
+    Vol::end();
+    return cardBegin(sdioConfig) ? Vol::begin(m_card) : Vol::begin(nullptr);
   }
   //----------------------------------------------------------------------------
   /** \return Pointer to SD card object. */

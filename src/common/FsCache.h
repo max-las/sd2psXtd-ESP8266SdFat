@@ -69,7 +69,11 @@ class FsCache {
       memcpy(dst, m_buffer, 512);
       return true;
     }
-    return m_blockDev->readSector(sector, dst);
+    if (!m_blockDev->readSector(sector, dst)) {
+      m_error = true;
+      return false;
+    }
+    return true;
   }
   /**
    * Cache safe read of multiple sectors.
@@ -83,7 +87,11 @@ class FsCache {
     if (isCached(sector, count) && !sync()) {
       return false;
     }
-    return m_blockDev->readSectors(sector, dst, count);
+    if (!m_blockDev->readSectors(sector, dst, count)) {
+      m_error = true;
+      return false;
+    }
+    return true;
   }
   /**
    * Cache safe write of a sectors.
@@ -96,7 +104,11 @@ class FsCache {
     if (isCached(sector)) {
       invalidate();
     }
-    return m_blockDev->writeSector(sector, src);
+    if (!m_blockDev->writeSector(sector, src)) {
+      m_error = true;
+      return false;
+    }
+    return true;
   }
   /**
    * Cache safe write of multiple sectors.
@@ -110,7 +122,11 @@ class FsCache {
      if (isCached(sector, count)) {
       invalidate();
     }
-    return m_blockDev->writeSectors(sector, src, count);
+    if (!m_blockDev->writeSectors(sector, src, count)) {
+      m_error = true;
+      return false;
+    }
+    return true;
   }
   /** \return Clear the cache and returns a pointer to the cache. */
   uint8_t* clear() {
@@ -129,8 +145,13 @@ class FsCache {
    */
   void init(BlockDevice* blockDev) {
     m_blockDev = blockDev;
+    m_error = false;
     invalidate();
   }
+  /** \return true if an I/O operation has failed since initialization. */
+  bool hasError() const {return m_error;}
+  /** Record an I/O failure performed outside this cache. */
+  void markError() {m_error = true;}
   /** Invalidate current cache sector. */
   void invalidate() {
     m_status = 0;
@@ -176,6 +197,7 @@ class FsCache {
 
  private:
   uint8_t m_status;
+  bool m_error = false;
   BlockDevice* m_blockDev;
   uint32_t m_mirrorOffset;
   uint32_t m_sector;

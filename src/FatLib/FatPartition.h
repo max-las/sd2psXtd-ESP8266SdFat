@@ -135,6 +135,23 @@ class FatPartition {
    * \return true for success or false for failure.
    */
   bool init(BlockDevice* dev, uint8_t part = 1);
+  /** Initialize a FAT partition at an explicit sector range.
+   *
+   * \param[in] dev BlockDevice for this partition.
+   * \param[in] firstSector First sector of the volume.
+   * \param[in] sectorCount Number of sectors in the volume.
+   *
+   * \return true for success or false for failure.
+   */
+  bool initAt(BlockDevice* dev, uint32_t firstSector, uint32_t sectorCount);
+  /** \return true if an I/O operation failed after initialization began. */
+  bool hasError() const {
+#if USE_SEPARATE_FAT_CACHE
+    return m_cache.hasError() || m_fatCache.hasError();
+#else
+    return m_cache.hasError();
+#endif
+  }
   /** \return The number of entries in the root directory for FAT16 volumes. */
   uint16_t rootDirEntryCount() const {
     return m_rootDirEntryCount;
@@ -171,6 +188,12 @@ class FatPartition {
   void dmpSector(print_t* pr, uint32_t sector, uint8_t bits = 8);
 #endif  // DOXYGEN_SHOULD_SKIP_THIS
   //----------------------------------------------------------------------------
+ protected:
+  void invalidatePartition() {
+    m_fatType = 0;
+    m_blockDev = nullptr;
+  }
+
  private:
   /** FatFile allowed access to private members. */
   friend class FatFile;
