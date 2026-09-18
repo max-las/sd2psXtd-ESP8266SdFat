@@ -127,6 +127,94 @@ bool runCurrentVolumeResetTest() {
     return true;
 }
 
+uint32_t exFatBootChecksum(const uint8_t* bootRegion) {
+    uint32_t checksum = 0;
+    for (uint32_t i = 0; i < 11 * 512; i++) {
+        if (i == 106 || i == 107 || i == 112) {
+            continue;
+        }
+        checksum = ((checksum << 31) | (checksum >> 1)) + bootRegion[i];
+    }
+    return checksum;
+}
+
+void updateExFatBootChecksum(uint32_t startSector) {
+    uint8_t* bootRegion = _sdCard + (uint64_t)startSector * 512;
+    uint32_t checksum = exFatBootChecksum(bootRegion);
+    for (uint16_t offset = 0; offset < 512; offset += 4) {
+        setLe32(bootRegion + 11 * 512 + offset, checksum);
+    }
+}
+
+bool runCompatibilityTests() {
+    int passed = 0;
+    const int total = 4;
+
+    printf("TEST: %-35s", "exFAT PartitionOffset zero");
+    _sdReadFailSector = -1;
+    if (loadImage("images/gpt_fat16_exfat.img")) {
+        memset(_sdCard + (uint64_t)2048 * 512, 0, 512);
+        setLe64(_sdCard + (uint64_t)34816 * 512 + 64, 0);
+        setLe64(_sdCard + (uint64_t)34828 * 512 + 64, 0);
+        updateExFatBootChecksum(34816);
+        updateExFatBootChecksum(34828);
+        SdFs sd;
+        if (sd.begin(SdSpiConfig(0, DEDICATED_SPI, SD_SCK_MHZ(50))) &&
+            sd.fatType() == FAT_TYPE_EXFAT && sd.exists("hello.txt")) {
+            printf("PASS\n");
+            passed++;
+        } else {
+            printf("FAIL: mount=%d error=%d fatType=%d\n", sd.fatType() != 0,
+                   sd.initErrorCode(), sd.fatType());
+        }
+    }
+
+    printf("TEST: %-35s", "exFAT erased main boot sector");
+    if (loadImage("images/superfloppy_exfat.img")) {
+        memset(_sdCard, 0, 512);
+        SdFs sd;
+        if (sd.begin(SdSpiConfig(0, DEDICATED_SPI, SD_SCK_MHZ(50))) &&
+            sd.fatType() == FAT_TYPE_EXFAT && sd.exists("hello.txt")) {
+            printf("PASS\n");
+            passed++;
+        } else {
+            printf("FAIL: error=%d fatType=%d\n", sd.initErrorCode(),
+                   sd.fatType());
+        }
+    }
+
+    printf("TEST: %-35s", "exFAT unreadable main boot sector");
+    if (loadImage("images/superfloppy_exfat.img")) {
+        _sdReadFailSector = 0;
+        SdFs sd;
+        if (sd.begin(SdSpiConfig(0, DEDICATED_SPI, SD_SCK_MHZ(50))) &&
+            sd.fatType() == FAT_TYPE_EXFAT && sd.exists("hello.txt")) {
+            printf("PASS\n");
+            passed++;
+        } else {
+            printf("FAIL: error=%d fatType=%d\n", sd.initErrorCode(),
+                   sd.fatType());
+        }
+    }
+
+    printf("TEST: %-35s", "FAT HiddenSectors zero");
+    _sdReadFailSector = -1;
+    if (loadImage("images/mbr_4primary.img")) {
+        setLe32(_sdCard + (uint64_t)2048 * 512 + 28, 0);
+        SdFs sd;
+        if (sd.begin(SdSpiConfig(0, DEDICATED_SPI, SD_SCK_MHZ(50))) &&
+            sd.fatType() == FAT_TYPE_FAT12 && sd.exists("hello.txt")) {
+            printf("PASS\n");
+            passed++;
+        } else {
+            printf("FAIL: error=%d fatType=%d\n", sd.initErrorCode(),
+                   sd.fatType());
+        }
+    }
+    _sdReadFailSector = -1;
+    return passed == total;
+}
+
 }  // namespace
 
 int main() {
@@ -202,6 +290,10 @@ int main() {
     }
     total++;
     if (runCurrentVolumeResetTest()) {
+        passed++;
+    }
+    total++;
+    if (runCompatibilityTests()) {
         passed++;
     }
     printf("\n%d/%d tests passed\n", passed, total);
