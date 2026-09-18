@@ -694,7 +694,7 @@ bool DedicatedSpiCard::readSectors(
 }
 //------------------------------------------------------------------------------
 bool DedicatedSpiCard::writeSector(uint32_t sector, const uint8_t* src) {
-  if (m_sharedSpi) {
+  if (m_sharedSpi || m_isolatedSectorWriteCmd) {
     return SharedSpiCard::writeSector(sector, src);
   } else {
     return writeSectors(sector, src, 1);

@@ -388,10 +388,20 @@ class DedicatedSpiCard : public SharedSpiCard {
    * \return true for success or false for failure.
    */
   bool writeSectors(uint32_t sector, const uint8_t* src, size_t ns);
+  /**
+   * Force isolated single sector writes to use CMD24 intead of CMD25.
+   * Some cards struggle to commit a CMD25 that emcompasses only one sector. If the caller knows
+   * it's about to write a single isolated sector, it can trigger a proper CMD24 to comply with
+   * these cards.
+   *
+   * \param[in] enable true to use CMD24 for single sector writes.
+   */
+  void setIsolatedSectorWriteCmd(bool enable) { m_isolatedSectorWriteCmd = enable; }
 
  private:
   uint32_t m_curSector;
   bool m_sharedSpi = true;
+  bool m_isolatedSectorWriteCmd = false;
 #else // HOST_MOCK
  public:
   DedicatedSpiCard() : m_errorCode(SD_CARD_ERROR_INIT_NOT_CALLED), m_type(0) {
@@ -445,6 +455,7 @@ class DedicatedSpiCard : public SharedSpiCard {
     memcpy(_sdCard + sector * 512, src, 512 * ns);
     return true;
   }
+  void setIsolatedSectorWriteCmd(bool enable) { (void)enable; }
 
   uint32_t sectorCount() { return _sdCardSizeB / 512LL; }
   bool syncDevice() { return true; }
