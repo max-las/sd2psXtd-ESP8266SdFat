@@ -408,9 +408,8 @@ bool FatPartition::init(BlockDevice* dev, uint8_t part) {
     DBG_FAIL_MACRO;
     return false;
   }
-  uint8_t mbrSector[512];
-  if (!dev->readSector(0, mbrSector)) {
-    m_cache.markError();
+  uint8_t* mbrSector = dataCachePrepare(0, FsCache::CACHE_FOR_READ);
+  if (!mbrSector) {
     DBG_FAIL_MACRO;
     return false;
   }
@@ -419,13 +418,13 @@ bool FatPartition::init(BlockDevice* dev, uint8_t part) {
     DBG_FAIL_MACRO;
     return false;
   }
-  MbrPart_t* mp = mbr->part + part - 1;
-  if (mp->type == 0 || (mp->boot != 0 && mp->boot != 0X80)) {
+  MbrPart_t mp = mbr->part[part - 1];
+  if (mp.type == 0 || (mp.boot != 0 && mp.boot != 0X80)) {
     DBG_FAIL_MACRO;
     return false;
   }
-  uint32_t volumeStartSector = getLe32(mp->relativeSectors);
-  uint32_t volumeSectorCount = getLe32(mp->totalSectors);
+  uint32_t volumeStartSector = getLe32(mp.relativeSectors);
+  uint32_t volumeSectorCount = getLe32(mp.totalSectors);
   return initAt(dev, volumeStartSector, volumeSectorCount);
 }
 //------------------------------------------------------------------------------
@@ -433,6 +432,7 @@ bool FatPartition::initAt(BlockDevice* dev,
                           uint32_t firstSector,
                           uint32_t sectorCount) {
   uint32_t clusterCount;
+  uint32_t hiddenSectors;
   uint32_t sectorsPerFat;
   uint32_t totalSectors;
   pbs_t* pbs;
@@ -461,10 +461,11 @@ bool FatPartition::initAt(BlockDevice* dev,
     goto fail;
   }
   bpb = reinterpret_cast<BpbFat32_t*>(pbs->bpb);
+  hiddenSectors = getLe32(bpb->hidddenSectors);
   if (getLe16(pbs->signature) != PBR_SIGNATURE || bpb->fatCount != 2 ||
       getLe16(bpb->bytesPerSector) != m_bytesPerSector ||
       getLe16(bpb->reservedSectorCount) == 0 ||
-      getLe32(bpb->hidddenSectors) != firstSector) {
+      (hiddenSectors != 0 && hiddenSectors != firstSector)) {
     DBG_FAIL_MACRO;
     goto fail;
   }

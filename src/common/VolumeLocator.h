@@ -7,6 +7,7 @@
 #define VolumeLocator_h
 #include <stdint.h>
 #include "BlockDevice.h"
+#include "GptStructs.h"
 //------------------------------------------------------------------------------
 /** Location of a mountable volume on the block device. */
 enum class VolumeFsType {
@@ -35,6 +36,12 @@ enum class VolumeFindError {
   CorruptPartitionTable
 };
 //------------------------------------------------------------------------------
+/** Cached GPT state used while trying multiple candidate volumes. */
+struct VolumeScanCache {
+  GptHeader_t gptHeader;
+  bool gptHeaderValid;
+};
+//------------------------------------------------------------------------------
 /** Find a mountable FAT12/16/32 or exFAT volume.
  *
  *  Tries Superfloppy, then MBR (4 primary partitions), then GPT.
@@ -46,12 +53,17 @@ enum class VolumeFindError {
  *  \param[in,out] searchIndex Optional persistent scan cursor. Initialize it
  *  to zero and reuse it to enumerate candidates without rescanning earlier
  *  partition entries. If null, only the first candidate is returned.
+ *  \param[in,out] scanCache Cached partition-table state. Zero-initialize it
+ *  before the first call and preserve it while enumerating candidates.
+ *  \param[in] sectorBuffer Reusable 512-byte sector buffer.
  *
  *  \return true if a mountable volume was found.
  */
 bool findMountableVolume(BlockDevice* dev,
                          VolumeLocation* location,
-                         VolumeFindError* error = nullptr,
-                         uint64_t* searchIndex = nullptr);
+                         VolumeFindError* error,
+                         uint64_t* searchIndex,
+                         VolumeScanCache* scanCache,
+                         uint8_t* sectorBuffer);
 
 #endif  // VolumeLocator_h

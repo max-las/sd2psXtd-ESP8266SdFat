@@ -49,11 +49,15 @@ bool gptIsValidHeader(const uint8_t* sector,
     DBG_LOG("GPT header size invalid");
     return false;
   }
-  // CRC is computed with headerCrc32 field zeroed.
-  uint8_t tmp[512];
-  memcpy(tmp, sector, sizeof(tmp));
-  memset(tmp + 16, 0, 4);
-  uint32_t computedCrc = gptCrc32(tmp, headerSize);
+  // CRC is computed with headerCrc32 field zeroed. Feed the three ranges
+  // separately so validation does not need another sector-sized buffer.
+  static const uint8_t zeroCrc[4] = {};
+  uint32_t computedCrc;
+  gptCrc32Begin(&computedCrc);
+  gptCrc32Update(&computedCrc, sector, 16);
+  gptCrc32Update(&computedCrc, zeroCrc, sizeof(zeroCrc));
+  gptCrc32Update(&computedCrc, sector + 20, headerSize - 20);
+  computedCrc = gptCrc32End(computedCrc);
   if (computedCrc != getLe32(hdr->headerCrc32)) {
     DBG_LOG("GPT header CRC mismatch");
     return false;

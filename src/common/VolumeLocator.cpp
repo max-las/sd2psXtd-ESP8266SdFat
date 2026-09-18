@@ -58,10 +58,11 @@ static bool isValidFatBootSector(const uint8_t* sector,
   uint16_t bytesPerSector = getLe16(bpb->bytesPerSector);
   uint8_t sectorsPerCluster = bpb->sectorsPerCluster;
   uint16_t reservedSectorCount = getLe16(bpb->reservedSectorCount);
+  uint32_t hiddenSectors = getLe32(bpb->hidddenSectors);
   if (bytesPerSector != 512 || !isPowerOfTwo(sectorsPerCluster) ||
       sectorsPerCluster > 128 || bpb->fatCount != 2 ||
       reservedSectorCount == 0 ||
-      getLe32(bpb->hidddenSectors) != volumeStart) {
+      (hiddenSectors != 0 && hiddenSectors != volumeStart)) {
     return false;
   }
 
@@ -124,7 +125,8 @@ static ProbeResult probeExFatBootRegion(BlockDevice* dev,
                                         const uint8_t* sector,
                                         uint32_t bootRegionStart,
                                         uint32_t volumeStart,
-                                        uint32_t volumeSectorCount) {
+                                        uint32_t volumeSectorCount,
+                                        uint8_t* sectorBuffer) {
   if (!hasPbrSignature(sector)) {
     return ProbeResult::Invalid;
   }
@@ -145,12 +147,13 @@ static ProbeResult probeExFatBootRegion(BlockDevice* dev,
       return ProbeResult::Invalid;
     }
   }
+  uint64_t partitionOffset = getLe64(bpb->partitionOffset);
   if (bpb->bytesPerSectorShift != 9 ||
       bpb->sectorsPerClusterShift > 16 ||
       bpb->numberOfFats != 1 ||
       getLe16(bpb->fileSystemRevision) != 0X0100 ||
       (getLe16(bpb->volumeFlags) & 1) != 0 ||
-      getLe64(bpb->partitionOffset) != volumeStart) {
+      (partitionOffset != 0 && partitionOffset != volumeStart)) {
     return ProbeResult::Invalid;
   }
 
@@ -180,59 +183,70 @@ static ProbeResult probeExFatBootRegion(BlockDevice* dev,
   }
 
   uint32_t checksum = exFatBootChecksumUpdate(0, sector, true);
-  uint8_t bootSector[512];
   for (uint32_t i = 1; i < 11; i++) {
-    if (!dev->readSector(bootRegionStart + i, bootSector)) {
+    if (!dev->readSector(bootRegionStart + i, sectorBuffer)) {
       return ProbeResult::CardError;
     }
-    if (i <= 8 && !hasPbrSignature(bootSector)) {
+    if (i <= 8 && !hasPbrSignature(sectorBuffer)) {
       return ProbeResult::Invalid;
     }
     if (i == 10) {
-      for (uint16_t offset = 0; offset < sizeof(bootSector); offset++) {
-        if (bootSector[offset]) {
+      for (uint16_t offset = 0; offset < 512; offset++) {
+        if (sectorBuffer[offset]) {
           return ProbeResult::Invalid;
         }
       }
     }
-    checksum = exFatBootChecksumUpdate(checksum, bootSector, false);
+    checksum = exFatBootChecksumUpdate(checksum, sectorBuffer, false);
   }
-  if (!dev->readSector(bootRegionStart + 11, bootSector)) {
+  if (!dev->readSector(bootRegionStart + 11, sectorBuffer)) {
     return ProbeResult::CardError;
   }
   for (uint16_t i = 0; i < 512; i += 4) {
-    if (getLe32(bootSector + i) != checksum) {
+    if (getLe32(sectorBuffer + i) != checksum) {
       return ProbeResult::Invalid;
     }
   }
   return ProbeResult::ExFat;
 }
 //------------------------------------------------------------------------------
-static ProbeResult probeExFatBootSector(BlockDevice* dev,
-                                        const uint8_t* sector,
-                                        uint32_t volumeStart,
-                                        uint32_t volumeSectorCount) {
+static bool hasExFatIdentity(const uint8_t* sector) {
   const ExFatPbs_t* pbs = reinterpret_cast<const ExFatPbs_t*>(sector);
   static const uint8_t jump[3] = {0XEB, 0X76, 0X90};
-  if (memcmp(pbs->oemName, "EXFAT   ", 8) != 0 &&
-      memcmp(pbs->jmpInstruction, jump, sizeof(jump)) != 0) {
-    return ProbeResult::Invalid;
+  return memcmp(pbs->oemName, "EXFAT   ", 8) == 0 &&
+         memcmp(pbs->jmpInstruction, jump, sizeof(jump)) == 0;
+}
+//------------------------------------------------------------------------------
+static ProbeResult probeVolume(BlockDevice* dev,
+                               uint8_t* sectorBuffer,
+                               uint32_t volumeStart,
+                               uint32_t volumeSectorCount,
+                               bool mainSectorRead) {
+  ProbeResult mainResult = mainSectorRead
+                               ? ProbeResult::Invalid
+                               : ProbeResult::CardError;
+  if (mainSectorRead) {
+    if (isValidFatBootSector(sectorBuffer, volumeStart, volumeSectorCount)) {
+      return ProbeResult::Fat;
+    }
+    if (hasExFatIdentity(sectorBuffer)) {
+      mainResult = probeExFatBootRegion(dev, sectorBuffer, volumeStart,
+                                       volumeStart, volumeSectorCount,
+                                       sectorBuffer);
+      if (mainResult == ProbeResult::ExFat) {
+        return mainResult;
+      }
+    }
   }
   if (volumeSectorCount < 24) {
-    return ProbeResult::Invalid;
-  }
-  ProbeResult mainResult = probeExFatBootRegion(dev, sector, volumeStart,
-                                                volumeStart,
-                                                volumeSectorCount);
-  if (mainResult == ProbeResult::ExFat || volumeSectorCount < 24) {
     return mainResult;
   }
-  uint8_t backupSector[512];
-  if (!dev->readSector(volumeStart + 12, backupSector)) {
+  if (!dev->readSector(volumeStart + 12, sectorBuffer)) {
     return ProbeResult::CardError;
   }
   ProbeResult backupResult = probeExFatBootRegion(
-      dev, backupSector, volumeStart + 12, volumeStart, volumeSectorCount);
+      dev, sectorBuffer, volumeStart + 12, volumeStart, volumeSectorCount,
+      sectorBuffer);
   if (backupResult == ProbeResult::ExFat) {
     return backupResult;
   }
@@ -241,22 +255,10 @@ static ProbeResult probeExFatBootSector(BlockDevice* dev,
              ? ProbeResult::CardError : ProbeResult::Invalid;
 }
 //------------------------------------------------------------------------------
-static ProbeResult probeBootSector(BlockDevice* dev,
-                                   const uint8_t* sector,
-                                   uint32_t volumeStart,
-                                   uint32_t volumeSectorCount) {
-  ProbeResult result = probeExFatBootSector(dev, sector, volumeStart,
-                                            volumeSectorCount);
-  if (result != ProbeResult::Invalid) {
-    return result;
-  }
-  return isValidFatBootSector(sector, volumeStart, volumeSectorCount)
-             ? ProbeResult::Fat : ProbeResult::Invalid;
-}
-//------------------------------------------------------------------------------
 static bool isValidGptEntryArray(BlockDevice* dev,
                                  const GptHeader_t* hdr,
-                                 VolumeFindError* error) {
+                                 VolumeFindError* error,
+                                 uint8_t* sectorBuffer) {
   uint32_t numEntries = getLe32(hdr->numberOfPartitionEntries);
   uint32_t entrySize = getLe32(hdr->sizeOfPartitionEntry);
   uint64_t arrayLba = getLe64(hdr->partitionEntryLba);
@@ -264,13 +266,11 @@ static bool isValidGptEntryArray(BlockDevice* dev,
   uint32_t crc;
   gptCrc32Begin(&crc);
   while (remaining) {
-    uint8_t sector[512];
-    if (!dev->readSector((uint32_t)arrayLba++, sector)) {
+    if (!dev->readSector((uint32_t)arrayLba++, sectorBuffer)) {
       return setError(error, VolumeFindError::CardError);
     }
-    uint32_t count = remaining < sizeof(sector)
-                         ? (uint32_t)remaining : sizeof(sector);
-    gptCrc32Update(&crc, sector, count);
+    uint32_t count = remaining < 512 ? (uint32_t)remaining : 512;
+    gptCrc32Update(&crc, sectorBuffer, count);
     remaining -= count;
   }
   if (gptCrc32End(crc) != getLe32(hdr->partitionEntryArrayCrc32)) {
@@ -301,36 +301,41 @@ static bool gptHeadersMatch(const GptHeader_t* primary,
 //------------------------------------------------------------------------------
 static ProbeResult checkGptEntryOverlap(BlockDevice* dev,
                                         const GptHeader_t* hdr,
-                                        uint64_t candidateIndex,
-                                        uint64_t candidateFirst,
-                                        uint64_t candidateLast) {
+                                        uint32_t candidateIndex,
+                                        uint32_t candidateFirst,
+                                        uint32_t candidateLast,
+                                        uint8_t* sectorBuffer) {
   uint32_t numEntries = getLe32(hdr->numberOfPartitionEntries);
   uint32_t entrySize = getLe32(hdr->sizeOfPartitionEntry);
-  uint64_t arrayStart = getLe64(hdr->partitionEntryLba);
-  uint64_t firstUsable = getLe64(hdr->firstUsableLba);
-  uint64_t lastUsable = getLe64(hdr->lastUsableLba);
-  uint64_t cachedLba = UINT64_MAX;
-  uint8_t sector[512];
+  uint32_t arrayStart = (uint32_t)getLe64(hdr->partitionEntryLba);
+  uint32_t firstUsable = (uint32_t)getLe64(hdr->firstUsableLba);
+  uint32_t lastUsable = (uint32_t)getLe64(hdr->lastUsableLba);
+  uint32_t cachedLba = UINT32_MAX;
   static const uint8_t zeroGuid[16] = {};
-  for (uint64_t index = 0; index < numEntries; index++) {
+  for (uint32_t index = 0; index < numEntries; index++) {
     if (index == candidateIndex) {
       continue;
     }
     uint64_t byteOffset = (uint64_t)index * entrySize;
-    uint64_t entryLba = arrayStart + byteOffset / 512;
+    uint32_t entryLba = arrayStart + (uint32_t)(byteOffset / 512);
     uint16_t offset = byteOffset % 512;
     if (entryLba != cachedLba) {
-      if (!dev->readSector((uint32_t)entryLba, sector)) {
+      if (!dev->readSector(entryLba, sectorBuffer)) {
         return ProbeResult::CardError;
       }
       cachedLba = entryLba;
     }
-    const uint8_t* entry = sector + offset;
+    const uint8_t* entry = sectorBuffer + offset;
     if (memcmp(entry, zeroGuid, sizeof(zeroGuid)) == 0) {
       continue;
     }
-    uint64_t first = getLe64(entry + 32);
-    uint64_t last = getLe64(entry + 40);
+    uint64_t first64 = getLe64(entry + 32);
+    uint64_t last64 = getLe64(entry + 40);
+    if (first64 > UINT32_MAX || last64 > UINT32_MAX) {
+      return ProbeResult::Invalid;
+    }
+    uint32_t first = (uint32_t)first64;
+    uint32_t last = (uint32_t)last64;
     if (first > last || first < firstUsable || last > lastUsable) {
       return ProbeResult::Invalid;
     }
@@ -344,35 +349,35 @@ static ProbeResult checkGptEntryOverlap(BlockDevice* dev,
 static bool selectGptHeader(BlockDevice* dev,
                             uint32_t cardSectorCount,
                             GptHeader_t* selected,
-                            VolumeFindError* error) {
-  uint8_t sector[512];
+                            VolumeFindError* error,
+                            uint8_t* sectorBuffer) {
   const GptHeader_t* header;
   GptHeader_t primary;
   GptHeader_t backup;
-  bool primaryRead = dev->readSector(1, sector);
+  bool primaryRead = dev->readSector(1, sectorBuffer);
   bool primaryValid = primaryRead &&
-      gptIsValidHeader(sector, 512, 1, cardSectorCount, &header);
+      gptIsValidHeader(sectorBuffer, 512, 1, cardSectorCount, &header);
   if (primaryValid) {
     memcpy(&primary, header, sizeof(primary));
   }
   uint64_t backupLba = primaryValid ? getLe64(primary.backupLba)
                                      : (uint64_t)cardSectorCount - 1;
-  bool backupRead = dev->readSector((uint32_t)backupLba, sector);
+  bool backupRead = dev->readSector((uint32_t)backupLba, sectorBuffer);
   bool backupValid = backupRead &&
-      gptIsValidHeader(sector, 512, backupLba, cardSectorCount, &header);
+      gptIsValidHeader(sectorBuffer, 512, backupLba, cardSectorCount, &header);
   if (backupValid) {
     memcpy(&backup, header, sizeof(backup));
   }
 
   if (primaryValid) {
     VolumeFindError primaryError;
-    if (isValidGptEntryArray(dev, &primary, &primaryError)) {
+    if (isValidGptEntryArray(dev, &primary, &primaryError, sectorBuffer)) {
       *selected = primary;
       return true;
     }
     VolumeFindError backupError = VolumeFindError::CorruptPartitionTable;
     if (backupValid && gptHeadersMatch(&primary, &backup) &&
-        isValidGptEntryArray(dev, &backup, &backupError)) {
+        isValidGptEntryArray(dev, &backup, &backupError, sectorBuffer)) {
       *selected = backup;
       return true;
     }
@@ -385,7 +390,7 @@ static bool selectGptHeader(BlockDevice* dev,
 
   if (backupValid) {
     VolumeFindError backupError;
-    if (isValidGptEntryArray(dev, &backup, &backupError)) {
+    if (isValidGptEntryArray(dev, &backup, &backupError, sectorBuffer)) {
       *selected = backup;
       return true;
     }
@@ -400,21 +405,31 @@ static bool findGptVolume(BlockDevice* dev,
                           uint32_t cardSectorCount,
                           VolumeLocation* loc,
                           VolumeFindError* error,
-                          uint64_t* searchIndex) {
+                          uint64_t* searchIndex,
+                          VolumeScanCache* scanCache,
+                          uint8_t* sectorBuffer) {
   if (cardSectorCount < 2) {
     return setError(error, VolumeFindError::CorruptPartitionTable);
   }
-  GptHeader_t header;
-  if (!selectGptHeader(dev, cardSectorCount, &header, error)) {
-    return false;
+  GptHeader_t localHeader;
+  GptHeader_t* hdr;
+  if (scanCache->gptHeaderValid) {
+    hdr = &scanCache->gptHeader;
+  } else {
+    if (!selectGptHeader(dev, cardSectorCount, &localHeader, error,
+                         sectorBuffer)) {
+      return false;
+    }
+    scanCache->gptHeader = localHeader;
+    scanCache->gptHeaderValid = true;
+    hdr = &scanCache->gptHeader;
   }
-  const GptHeader_t* hdr = &header;
 
   uint32_t numEntries = getLe32(hdr->numberOfPartitionEntries);
   uint32_t entrySize = getLe32(hdr->sizeOfPartitionEntry);
-  uint64_t arrayStart = getLe64(hdr->partitionEntryLba);
-  uint64_t firstUsable = getLe64(hdr->firstUsableLba);
-  uint64_t lastUsable = getLe64(hdr->lastUsableLba);
+  uint32_t arrayStart = (uint32_t)getLe64(hdr->partitionEntryLba);
+  uint32_t firstUsable = (uint32_t)getLe64(hdr->firstUsableLba);
+  uint32_t lastUsable = (uint32_t)getLe64(hdr->lastUsableLba);
   bool sawCardError = searchIndex && (*searchIndex & SEARCH_SAW_CARD_ERROR);
   uint64_t next = searchIndex ? *searchIndex & SEARCH_INDEX_MASK : 0;
   uint64_t totalSlots = (uint64_t)numEntries * 2;
@@ -424,32 +439,33 @@ static bool findGptVolume(BlockDevice* dev,
   }
 
   // Prefer Microsoft Basic Data entries while preserving table order.
-  uint8_t startPass = (uint8_t)(next / numEntries);
+  uint8_t startPass = next >= numEntries ? 1 : 0;
   for (uint8_t pass = startPass; pass < 2; pass++) {
-    uint64_t cachedLba = UINT64_MAX;
-    uint8_t entrySector[512];
-    uint64_t firstIndex = pass == startPass ? next % numEntries : 0;
-    for (uint64_t index = firstIndex; index < numEntries; index++) {
+    uint32_t cachedLba = UINT32_MAX;
+    uint32_t firstIndex = pass == startPass
+                              ? (uint32_t)(startPass ? next - numEntries : next)
+                              : 0;
+    for (uint32_t index = firstIndex; index < numEntries; index++) {
       uint64_t slot = (uint64_t)pass * numEntries + index;
       if (searchIndex) {
         *searchIndex = (slot + 1) |
                        (sawCardError ? SEARCH_SAW_CARD_ERROR : 0);
       }
       uint64_t byteOffset = (uint64_t)index * entrySize;
-      uint64_t entryLba = arrayStart + byteOffset / 512;
+      uint32_t entryLba = arrayStart + (uint32_t)(byteOffset / 512);
       uint16_t offset = byteOffset % 512;
       if (entryLba != cachedLba) {
-        if (!dev->readSector((uint32_t)entryLba, entrySector)) {
+        if (!dev->readSector(entryLba, sectorBuffer)) {
           sawCardError = true;
           if (searchIndex) {
             *searchIndex |= SEARCH_SAW_CARD_ERROR;
           }
-          cachedLba = UINT64_MAX;
+          cachedLba = UINT32_MAX;
           continue;
         }
         cachedLba = entryLba;
       }
-      const uint8_t* entry = entrySector + offset;
+      const uint8_t* entry = sectorBuffer + offset;
       static const uint8_t zeroGuid[16] = {};
       if (memcmp(entry, zeroGuid, sizeof(zeroGuid)) == 0) {
         continue;
@@ -471,8 +487,26 @@ static bool findGptVolume(BlockDevice* dev,
         sawInvalidEntry = true;
         continue;
       }
+      uint32_t start = (uint32_t)firstLba;
+      uint32_t size = (uint32_t)size64;
+      bool mainSectorRead = dev->readSector(start, sectorBuffer);
+      ProbeResult probe = probeVolume(dev, sectorBuffer, start, size,
+                                      mainSectorRead);
+      // Probing reuses the entry-array buffer, so the next table entry must
+      // reload its sector even when it shares the same LBA.
+      cachedLba = UINT32_MAX;
+      if (probe == ProbeResult::CardError) {
+        sawCardError = true;
+        if (searchIndex) {
+          *searchIndex |= SEARCH_SAW_CARD_ERROR;
+        }
+        continue;
+      }
+      if (probe != ProbeResult::Fat && probe != ProbeResult::ExFat) {
+        continue;
+      }
       ProbeResult overlap = checkGptEntryOverlap(
-          dev, hdr, index, firstLba, lastLba);
+          dev, hdr, index, start, (uint32_t)lastLba, sectorBuffer);
       if (overlap == ProbeResult::CardError) {
         sawCardError = true;
         if (searchIndex) {
@@ -482,27 +516,6 @@ static bool findGptVolume(BlockDevice* dev,
       }
       if (overlap == ProbeResult::Invalid) {
         sawInvalidEntry = true;
-        continue;
-      }
-      uint32_t start = (uint32_t)firstLba;
-      uint32_t size = (uint32_t)size64;
-      uint8_t pbs[512];
-      if (!dev->readSector(start, pbs)) {
-        sawCardError = true;
-        if (searchIndex) {
-          *searchIndex |= SEARCH_SAW_CARD_ERROR;
-        }
-        continue;
-      }
-      ProbeResult probe = probeBootSector(dev, pbs, start, size);
-      if (probe == ProbeResult::CardError) {
-        sawCardError = true;
-        if (searchIndex) {
-          *searchIndex |= SEARCH_SAW_CARD_ERROR;
-        }
-        continue;
-      }
-      if (probe != ProbeResult::Fat && probe != ProbeResult::ExFat) {
         continue;
       }
       loc->firstSector = start;
@@ -525,10 +538,10 @@ static bool findGptVolume(BlockDevice* dev,
                              : VolumeFindError::NoSupportedFileSystem);
 }
 //------------------------------------------------------------------------------
-static bool isProtectiveMbr(const MbrSector_t* mbr,
+static bool isProtectiveMbr(const MbrPart_t* parts,
                             uint32_t cardSectorCount) {
   for (uint8_t i = 0; i < 4; i++) {
-    const MbrPart_t* part = &mbr->part[i];
+    const MbrPart_t* part = &parts[i];
     uint32_t size = getLe32(part->totalSectors);
     if (part->type == 0XEE && (part->boot == 0 || part->boot == 0X80) &&
         getLe32(part->relativeSectors) == 1 && size != 0 &&
@@ -540,13 +553,16 @@ static bool isProtectiveMbr(const MbrSector_t* mbr,
 }
 //------------------------------------------------------------------------------
 static bool findMbrVolume(BlockDevice* dev,
-                          const MbrSector_t* mbr,
+                          const MbrPart_t* parts,
                           uint32_t cardSectorCount,
                           VolumeLocation* loc,
                           VolumeFindError* error,
-                          uint64_t* searchIndex) {
-  if (isProtectiveMbr(mbr, cardSectorCount)) {
-    return findGptVolume(dev, cardSectorCount, loc, error, searchIndex);
+                          uint64_t* searchIndex,
+                          VolumeScanCache* scanCache,
+                          uint8_t* sectorBuffer) {
+  if (isProtectiveMbr(parts, cardSectorCount)) {
+    return findGptVolume(dev, cardSectorCount, loc, error, searchIndex,
+                         scanCache, sectorBuffer);
   }
   bool sawCardError = searchIndex && (*searchIndex & SEARCH_SAW_CARD_ERROR);
   uint64_t next = searchIndex ? *searchIndex & SEARCH_INDEX_MASK : 0;
@@ -555,7 +571,7 @@ static bool findMbrVolume(BlockDevice* dev,
       *searchIndex = (i + 1) |
                      (sawCardError ? SEARCH_SAW_CARD_ERROR : 0);
     }
-    const MbrPart_t* part = &mbr->part[i];
+    const MbrPart_t* part = &parts[i];
     if (part->type == 0 || (part->boot != 0 && part->boot != 0X80)) {
       continue;
     }
@@ -565,15 +581,9 @@ static bool findMbrVolume(BlockDevice* dev,
         size > cardSectorCount - start) {
       continue;
     }
-    uint8_t pbs[512];
-    if (!dev->readSector(start, pbs)) {
-      sawCardError = true;
-      if (searchIndex) {
-        *searchIndex |= SEARCH_SAW_CARD_ERROR;
-      }
-      continue;
-    }
-    ProbeResult probe = probeBootSector(dev, pbs, start, size);
+    bool mainSectorRead = dev->readSector(start, sectorBuffer);
+    ProbeResult probe = probeVolume(dev, sectorBuffer, start, size,
+                                    mainSectorRead);
     if (probe == ProbeResult::CardError) {
       sawCardError = true;
       if (searchIndex) {
@@ -600,19 +610,52 @@ static bool findMbrVolume(BlockDevice* dev,
 bool findMountableVolume(BlockDevice* dev,
                          VolumeLocation* loc,
                          VolumeFindError* error,
-                         uint64_t* searchIndex) {
-  if (!dev || !loc) {
+                         uint64_t* searchIndex,
+                         VolumeScanCache* scanCache,
+                         uint8_t* sectorBuffer) {
+  if (!dev || !loc || !scanCache || !sectorBuffer) {
     return setError(error, VolumeFindError::NoSupportedFileSystem);
   }
   uint32_t cardSectorCount = dev->sectorCount();
   if (cardSectorCount == 0) {
     return setError(error, VolumeFindError::NoSupportedFileSystem);
   }
-  uint8_t sector[512];
-  if (!dev->readSector(0, sector)) {
+  // Once GPT is validated, continue directly from the cached header instead
+  // of rereading both headers and recomputing the entry-array CRC.
+  if (scanCache->gptHeaderValid) {
+    return findGptVolume(dev, cardSectorCount, loc, error, searchIndex,
+                         scanCache, sectorBuffer);
+  }
+  bool mainSectorRead = dev->readSector(0, sectorBuffer);
+  if (!mainSectorRead) {
+    ProbeResult backupProbe = probeVolume(dev, sectorBuffer, 0,
+                                          cardSectorCount, false);
+    if (backupProbe == ProbeResult::ExFat) {
+      loc->firstSector = 0;
+      loc->sectorCount = cardSectorCount;
+      loc->type = VolumeFsType::ExFat;
+      if (searchIndex) {
+        *searchIndex = 1;
+      }
+      if (error) {
+        *error = VolumeFindError::None;
+      }
+      return true;
+    }
     return setError(error, VolumeFindError::CardError);
   }
-  ProbeResult probe = probeBootSector(dev, sector, 0, cardSectorCount);
+  const MbrSector_t* mbr = reinterpret_cast<const MbrSector_t*>(sectorBuffer);
+  MbrPart_t parts[4];
+  memcpy(parts, mbr->part, sizeof(parts));
+  bool hasMbrSignature = getLe16(mbr->signature) == MBR_SIGNATURE;
+  bool alreadyScanningPartitions =
+      searchIndex && (*searchIndex & SEARCH_INDEX_MASK) != 0;
+  if (alreadyScanningPartitions && hasMbrSignature) {
+    return findMbrVolume(dev, parts, cardSectorCount, loc, error, searchIndex,
+                         scanCache, sectorBuffer);
+  }
+  ProbeResult probe = probeVolume(dev, sectorBuffer, 0, cardSectorCount,
+                                  mainSectorRead);
   if (probe == ProbeResult::CardError) {
     return setError(error, VolumeFindError::CardError);
   }
@@ -632,11 +675,10 @@ bool findMountableVolume(BlockDevice* dev,
     }
     return true;
   }
-  const MbrSector_t* mbr = reinterpret_cast<const MbrSector_t*>(sector);
-  if (getLe16(mbr->signature) != MBR_SIGNATURE) {
+  if (!hasMbrSignature) {
     return setError(error, VolumeFindError::NoSupportedFileSystem);
   }
-  return findMbrVolume(dev, mbr, cardSectorCount, loc, error,
-                       searchIndex);
+  return findMbrVolume(dev, parts, cardSectorCount, loc, error, searchIndex,
+                       scanCache, sectorBuffer);
 }
 //------------------------------------------------------------------------------

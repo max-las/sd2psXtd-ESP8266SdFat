@@ -40,28 +40,26 @@ static uint32_t bootChecksumUpdate(uint32_t checksum, const uint8_t* sector,
 static bool readBootRegion(BlockDevice* dev, uint32_t start,
                            uint8_t* firstSector, bool* ioError) {
   uint32_t checksum = 0;
-  uint8_t sector[512];
   for (uint8_t i = 0; i < 12; i++) {
-    uint8_t* dst = i == 0 ? firstSector : sector;
-    if (!dev->readSector(start + i, dst)) {
+    if (!dev->readSector(start + i, firstSector)) {
       *ioError = true;
       return false;
     }
-    if (i <= 8 && i != 0 && getLe16(dst + 510) != PBR_SIGNATURE) {
+    if (i <= 8 && i != 0 && getLe16(firstSector + 510) != PBR_SIGNATURE) {
       return false;
     }
     if (i == 10) {
-      for (uint16_t offset = 0; offset < sizeof(sector); offset++) {
-        if (dst[offset]) {
+      for (uint16_t offset = 0; offset < 512; offset++) {
+        if (firstSector[offset]) {
           return false;
         }
       }
     }
     if (i < 11) {
-      checksum = bootChecksumUpdate(checksum, dst, i == 0);
+      checksum = bootChecksumUpdate(checksum, firstSector, i == 0);
     } else {
       for (uint16_t offset = 0; offset < 512; offset += 4) {
-        if (getLe32(dst + offset) != checksum) {
+        if (getLe32(firstSector + offset) != checksum) {
           return false;
         }
       }
@@ -90,11 +88,12 @@ static bool isValidBootSector(const uint8_t* sector, uint32_t firstSector,
       return false;
     }
   }
+  uint64_t partitionOffset = getLe64(bpb->partitionOffset);
   if (bpb->bytesPerSectorShift != 9 ||
       bpb->sectorsPerClusterShift > 16 || bpb->numberOfFats != 1 ||
       getLe16(bpb->fileSystemRevision) != 0X0100 ||
       (getLe16(bpb->volumeFlags) & 1) != 0 ||
-      getLe64(bpb->partitionOffset) != firstSector) {
+      (partitionOffset != 0 && partitionOffset != firstSector)) {
     return false;
   }
   uint64_t volumeLength = getLe64(bpb->volumeLength);
@@ -374,9 +373,8 @@ bool ExFatPartition::init(BlockDevice* dev, uint8_t part) {
     DBG_FAIL_MACRO;
     return false;
   }
-  uint8_t mbrSector[512];
-  if (!dev->readSector(0, mbrSector)) {
-    m_dataCache.markError();
+  uint8_t* mbrSector = dataCachePrepare(0, FsCache::CACHE_FOR_READ);
+  if (!mbrSector) {
     DBG_FAIL_MACRO;
     return false;
   }
@@ -385,13 +383,13 @@ bool ExFatPartition::init(BlockDevice* dev, uint8_t part) {
     DBG_FAIL_MACRO;
     return false;
   }
-  MbrPart_t* mp = &mbr->part[part - 1];
-  if ((mp->boot != 0 && mp->boot != 0X80) || mp->type == 0) {
+  MbrPart_t mp = mbr->part[part - 1];
+  if ((mp.boot != 0 && mp.boot != 0X80) || mp.type == 0) {
     DBG_FAIL_MACRO;
     return false;
   }
-  uint32_t volStart = getLe32(mp->relativeSectors);
-  uint32_t volSize = getLe32(mp->totalSectors);
+  uint32_t volStart = getLe32(mp.relativeSectors);
+  uint32_t volSize = getLe32(mp.totalSectors);
   return initAt(dev, volStart, volSize);
 }
 //------------------------------------------------------------------------------
@@ -407,6 +405,7 @@ bool ExFatPartition::initAt(BlockDevice* dev,
   uint32_t fatOffset;
   uint64_t clusterRegionSectors;
   uint64_t fatRegionEnd;
+  uint64_t partitionOffset;
   uint64_t requiredFatSectors;
   uint64_t volumeLength;
   bool ioError = false;
@@ -421,11 +420,21 @@ bool ExFatPartition::initAt(BlockDevice* dev,
     goto fail;
   }
   if (readBootRegion(dev, firstSector, bootSector, &ioError)) {
-    validBootSector = isValidBootSector(bootSector, firstSector, sectorCount);
+    // readBootRegion reuses this buffer, so reload the first sector for BPB
+    // validation after the checksum sector has been consumed.
+    if (dev->readSector(firstSector, bootSector)) {
+      validBootSector = isValidBootSector(bootSector, firstSector, sectorCount);
+    } else {
+      ioError = true;
+    }
   }
   if (!validBootSector && sectorCount >= 24 &&
       readBootRegion(dev, firstSector + 12, bootSector, &ioError)) {
-    validBootSector = isValidBootSector(bootSector, firstSector, sectorCount);
+    if (dev->readSector(firstSector + 12, bootSector)) {
+      validBootSector = isValidBootSector(bootSector, firstSector, sectorCount);
+    } else {
+      ioError = true;
+    }
   }
   if (!validBootSector) {
     if (ioError) {
@@ -448,12 +457,13 @@ bool ExFatPartition::initAt(BlockDevice* dev,
       goto fail;
     }
   }
+  partitionOffset = getLe64(bpb->partitionOffset);
   if (bpb->bytesPerSectorShift != m_bytesPerSectorShift ||
       bpb->sectorsPerClusterShift > 16 ||
       bpb->numberOfFats != 1 ||
       getLe16(bpb->fileSystemRevision) != 0X0100 ||
       (getLe16(bpb->volumeFlags) & 1) != 0 ||
-      getLe64(bpb->partitionOffset) != firstSector) {
+      (partitionOffset != 0 && partitionOffset != firstSector)) {
     DBG_FAIL_MACRO;
     goto fail;
   }

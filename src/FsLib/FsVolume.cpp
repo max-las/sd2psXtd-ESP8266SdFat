@@ -55,10 +55,14 @@ bool FsVolume::begin(BlockDevice* blockDev) {
   bool sawCandidate = false;
   bool sawCardError = false;
   uint64_t searchIndex = 0;
+  VolumeScanCache scanCache = {};
+  static_assert(sizeof(m_volMem) >= 512, "m_volMem too small");
+  uint8_t* sectorBuffer = reinterpret_cast<uint8_t*>(m_volMem);
   while (true) {
     VolumeLocation loc;
     VolumeFindError err = VolumeFindError::None;
-    if (!findMountableVolume(m_blockDev, &loc, &err, &searchIndex)) {
+    if (!findMountableVolume(m_blockDev, &loc, &err, &searchIndex,
+                             &scanCache, sectorBuffer)) {
       if (err == VolumeFindError::CardError) {
         sawCardError = true;
       } else if (err == VolumeFindError::CorruptPartitionTable) {
