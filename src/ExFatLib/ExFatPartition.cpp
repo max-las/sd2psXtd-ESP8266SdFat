@@ -503,10 +503,12 @@ bool ExFatPartition::initAt(BlockDevice* dev,
   m_clusterMask = m_bytesPerCluster - 1;
   // Set m_bitmapStart to first free cluster.
   m_bitmapStart = 0;
+  #if 0
   if (bitmapFind(0, 1) == 0) {
     DBG_FAIL_MACRO;
     goto fail;
   }
+  #endif
   m_fatType = FAT_TYPE_EXFAT;
   return true;
 
