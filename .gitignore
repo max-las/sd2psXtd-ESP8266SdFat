@@ -188,6 +188,13 @@ $RECYCLE.BIN/
 #############
 
 *.py[co]
+*.d
+*.o
+
+# Host mount-test artifacts.
+tests/host_test
+tests/images/
+tests/tests/
 
 # Packages
 *.egg
@@ -213,3 +220,4 @@ pip-log.txt
 
 #Mr Developer
 .mr.developer.cfg
+tests/venv

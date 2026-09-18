@@ -391,42 +391,81 @@ int32_t FatPartition::freeClusterCount() {
 }
 //------------------------------------------------------------------------------
 bool FatPartition::init(BlockDevice* dev, uint8_t part) {
-  uint32_t clusterCount;
-  uint32_t totalSectors;
-  uint32_t volumeStartSector = 0;
-  m_blockDev = dev;
-  pbs_t* pbs;
-  BpbFat32_t* bpb;
-  MbrSector_t* mbr;
-  uint8_t tmp;
   m_fatType = 0;
-  m_allocSearchStart = 1;
+  m_blockDev = dev;
   m_cache.init(dev);
 #if USE_SEPARATE_FAT_CACHE
   m_fatCache.init(dev);
 #endif  // USE_SEPARATE_FAT_CACHE
-  // if part == 0 assume super floppy with FAT boot sector in sector zero
-  // if part > 0 assume mbr volume with partition table
-  if (part) {
-    if (part > 4) {
-      DBG_FAIL_MACRO;
-      goto fail;
-    }
-    mbr = reinterpret_cast<MbrSector_t*>
-          (dataCachePrepare(0, FsCache::CACHE_FOR_READ));
-    MbrPart_t* mp = mbr->part + part - 1;
-
-    if (!mbr || mp->type == 0 || (mp->boot != 0 && mp->boot != 0X80)) {
-      DBG_FAIL_MACRO;
-      goto fail;
-    }
-    volumeStartSector = getLe32(mp->relativeSectors);
+  if (!dev) {
+    DBG_FAIL_MACRO;
+    return false;
+  }
+  if (part == 0) {
+    return initAt(dev, 0, dev->sectorCount());
+  }
+  if (part > 4) {
+    DBG_FAIL_MACRO;
+    return false;
+  }
+  uint8_t* mbrSector = dataCachePrepare(0, FsCache::CACHE_FOR_READ);
+  if (!mbrSector) {
+    DBG_FAIL_MACRO;
+    return false;
+  }
+  MbrSector_t* mbr = reinterpret_cast<MbrSector_t*>(mbrSector);
+  if (getLe16(mbr->signature) != MBR_SIGNATURE) {
+    DBG_FAIL_MACRO;
+    return false;
+  }
+  MbrPart_t mp = mbr->part[part - 1];
+  if (mp.type == 0 || (mp.boot != 0 && mp.boot != 0X80)) {
+    DBG_FAIL_MACRO;
+    return false;
+  }
+  uint32_t volumeStartSector = getLe32(mp.relativeSectors);
+  uint32_t volumeSectorCount = getLe32(mp.totalSectors);
+  return initAt(dev, volumeStartSector, volumeSectorCount);
+}
+//------------------------------------------------------------------------------
+bool FatPartition::initAt(BlockDevice* dev,
+                          uint32_t firstSector,
+                          uint32_t sectorCount) {
+  uint32_t clusterCount;
+  uint32_t hiddenSectors;
+  uint32_t sectorsPerFat;
+  uint32_t totalSectors;
+  pbs_t* pbs;
+  BpbFat32_t* bpb;
+  uint64_t dataStart;
+  uint64_t fatBytes;
+  uint64_t requiredFatBytes;
+  uint64_t rootDirSectors;
+  uint8_t tmp;
+  m_fatType = 0;
+  m_allocSearchStart = 1;
+  m_blockDev = dev;
+  m_cache.init(dev);
+#if USE_SEPARATE_FAT_CACHE
+  m_fatCache.init(dev);
+#endif  // USE_SEPARATE_FAT_CACHE
+  if (!dev || sectorCount == 0 || firstSector >= dev->sectorCount() ||
+      sectorCount > dev->sectorCount() - firstSector) {
+    DBG_FAIL_MACRO;
+    goto fail;
   }
   pbs = reinterpret_cast<pbs_t*>
-        (dataCachePrepare(volumeStartSector, FsCache::CACHE_FOR_READ));
+        (dataCachePrepare(firstSector, FsCache::CACHE_FOR_READ));
+  if (!pbs) {
+    DBG_FAIL_MACRO;
+    goto fail;
+  }
   bpb = reinterpret_cast<BpbFat32_t*>(pbs->bpb);
-  if (!pbs || bpb->fatCount != 2 ||
-    getLe16(bpb->bytesPerSector) != m_bytesPerSector) {
+  hiddenSectors = getLe32(bpb->hidddenSectors);
+  if (getLe16(pbs->signature) != PBR_SIGNATURE || bpb->fatCount != 2 ||
+      getLe16(bpb->bytesPerSector) != m_bytesPerSector ||
+      getLe16(bpb->reservedSectorCount) == 0 ||
+      (hiddenSectors != 0 && hiddenSectors != firstSector)) {
     DBG_FAIL_MACRO;
     goto fail;
   }
@@ -441,48 +480,72 @@ bool FatPartition::init(BlockDevice* dev, uint8_t part) {
     }
     m_sectorsPerClusterShift++;
   }
-  m_sectorsPerFat = getLe16(bpb->sectorsPerFat16);
-  if (m_sectorsPerFat == 0) {
-    m_sectorsPerFat = getLe32(bpb->sectorsPerFat32);
+  sectorsPerFat = getLe16(bpb->sectorsPerFat16);
+  if (sectorsPerFat == 0) {
+    sectorsPerFat = getLe32(bpb->sectorsPerFat32);
   }
-  m_fatStartSector = volumeStartSector + getLe16(bpb->reservedSectorCount);
+  if (sectorsPerFat == 0) {
+    DBG_FAIL_MACRO;
+    goto fail;
+  }
 
-  // count for FAT16 zero for FAT32
   m_rootDirEntryCount = getLe16(bpb->rootDirEntryCount);
-
-  // directory start for FAT16 dataStart for FAT32
-  m_rootDirStart = m_fatStartSector + 2 * m_sectorsPerFat;
-  // data start for FAT16 and FAT32
-  m_dataStartSector = m_rootDirStart +
-    ((FS_DIR_SIZE*m_rootDirEntryCount + m_bytesPerSector - 1)/m_bytesPerSector);
-
-  // total sectors for FAT16 or FAT32
   totalSectors = getLe16(bpb->totalSectors16);
   if (totalSectors == 0) {
     totalSectors = getLe32(bpb->totalSectors32);
   }
-  // total data sectors
-  clusterCount = totalSectors - (m_dataStartSector - volumeStartSector);
-
-  // divide by cluster size to get cluster count
-  clusterCount >>= m_sectorsPerClusterShift;
-  m_lastCluster = clusterCount + 1;
-
-  // Indicate unknown number of free clusters.
-  setFreeClusterCount(-1);
-  // FAT type is determined by cluster count
+  rootDirSectors = ((uint64_t)FS_DIR_SIZE * m_rootDirEntryCount +
+                    m_bytesPerSector - 1) / m_bytesPerSector;
+  dataStart = (uint64_t)getLe16(bpb->reservedSectorCount) +
+              (uint64_t)bpb->fatCount * sectorsPerFat + rootDirSectors;
+  if (totalSectors == 0 || totalSectors > sectorCount ||
+      dataStart >= totalSectors) {
+    DBG_FAIL_MACRO;
+    goto fail;
+  }
+  clusterCount = (totalSectors - (uint32_t)dataStart) >>
+                 m_sectorsPerClusterShift;
+  if (clusterCount < 2 || clusterCount > 0X0FFFFFF6) {
+    DBG_FAIL_MACRO;
+    goto fail;
+  }
+  fatBytes = (uint64_t)sectorsPerFat * m_bytesPerSector;
   if (clusterCount < 4085) {
-    m_fatType = 12;
+    requiredFatBytes = ((uint64_t)(clusterCount + 2) * 3 + 1) / 2;
     if (!FAT12_SUPPORT) {
       DBG_FAIL_MACRO;
       goto fail;
     }
   } else if (clusterCount < 65525) {
-    m_fatType = 16;
+    requiredFatBytes = (uint64_t)(clusterCount + 2) * 2;
   } else {
-    m_rootDirStart = getLe32(bpb->fat32RootCluster);
-    m_fatType = 32;
+    requiredFatBytes = (uint64_t)(clusterCount + 2) * 4;
   }
+  if (fatBytes < requiredFatBytes ||
+      (clusterCount >= 65525 && m_rootDirEntryCount != 0) ||
+      (clusterCount < 65525 && m_rootDirEntryCount == 0)) {
+    DBG_FAIL_MACRO;
+    goto fail;
+  }
+  if (clusterCount >= 65525) {
+    uint32_t rootCluster = getLe32(bpb->fat32RootCluster);
+    if (rootCluster < 2 || rootCluster > clusterCount + 1) {
+      DBG_FAIL_MACRO;
+      goto fail;
+    }
+    m_rootDirStart = rootCluster;
+    m_fatType = 32;
+  } else {
+    m_fatType = clusterCount < 4085 ? 12 : 16;
+  }
+  m_sectorsPerFat = sectorsPerFat;
+  m_fatStartSector = firstSector + getLe16(bpb->reservedSectorCount);
+  if (m_fatType != 32) {
+    m_rootDirStart = m_fatStartSector + 2 * m_sectorsPerFat;
+  }
+  m_dataStartSector = firstSector + (uint32_t)dataStart;
+  m_lastCluster = clusterCount + 1;
+  setFreeClusterCount(-1);
   m_cache.setMirrorOffset(m_sectorsPerFat);
 #if USE_SEPARATE_FAT_CACHE
   m_fatCache.setMirrorOffset(m_sectorsPerFat);

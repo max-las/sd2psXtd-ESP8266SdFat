@@ -37,6 +37,9 @@
 #ifdef HOST_MOCK
 extern uint64_t _sdCardSizeB;
 extern uint8_t *_sdCard;
+#ifdef HOST_MOCK_READ_FAILURE
+extern int64_t _sdReadFailSector;
+#endif
 #endif
 
 //==============================================================================
@@ -337,7 +340,11 @@ class SharedSpiCard {
  * \class DedicatedSpiCard
  * \brief Raw access to SD and SDHC flash memory cards via dedicate SPI port.
  */
+#if defined(HOST_MOCK) && USE_BLOCK_DEVICE_INTERFACE
+class DedicatedSpiCard : public BlockDeviceInterface {
+#else
 class DedicatedSpiCard : public SharedSpiCard {
+#endif
 #ifndef HOST_MOCK
  public:
   /** Construct an instance of DedicatedSpiCard. */
@@ -381,10 +388,20 @@ class DedicatedSpiCard : public SharedSpiCard {
    * \return true for success or false for failure.
    */
   bool writeSectors(uint32_t sector, const uint8_t* src, size_t ns);
+  /**
+   * Force isolated single sector writes to use CMD24 intead of CMD25.
+   * Some cards struggle to commit a CMD25 that emcompasses only one sector. If the caller knows
+   * it's about to write a single isolated sector, it can trigger a proper CMD24 to comply with
+   * these cards.
+   *
+   * \param[in] enable true to use CMD24 for single sector writes.
+   */
+  void setIsolatedSectorWriteCmd(bool enable) { m_isolatedSectorWriteCmd = enable; }
 
  private:
   uint32_t m_curSector;
   bool m_sharedSpi = true;
+  bool m_isolatedSectorWriteCmd = false;
 #else // HOST_MOCK
  public:
   DedicatedSpiCard() : m_errorCode(SD_CARD_ERROR_INIT_NOT_CALLED), m_type(0) {
@@ -410,6 +427,14 @@ class DedicatedSpiCard : public SharedSpiCard {
     return readSectors(sector, dst, 1);
   }
   bool readSectors(uint32_t sector, uint8_t* dst, size_t ns) {
+#ifdef HOST_MOCK_READ_FAILURE
+    if (_sdReadFailSector >= 0 &&
+        (uint64_t)_sdReadFailSector >= sector &&
+        (uint64_t)_sdReadFailSector < (uint64_t)sector + ns) {
+      m_errorCode = SD_CARD_ERROR_READ_TIMEOUT;
+      return false;
+    }
+#endif
     if ((int)(sector + ns) > (int) (_sdCardSizeB / 512LL)) return false;
     memcpy(dst, _sdCard + sector * 512, 512 * ns);
     return true;
@@ -430,6 +455,7 @@ class DedicatedSpiCard : public SharedSpiCard {
     memcpy(_sdCard + sector * 512, src, 512 * ns);
     return true;
   }
+  void setIsolatedSectorWriteCmd(bool enable) { (void)enable; }
 
   uint32_t sectorCount() { return _sdCardSizeB / 512LL; }
   bool syncDevice() { return true; }

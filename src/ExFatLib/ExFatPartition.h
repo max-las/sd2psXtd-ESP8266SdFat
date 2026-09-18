@@ -97,6 +97,21 @@ class ExFatPartition {
    * \return true for success or false for failure.
    */
   bool init(BlockDevice* dev, uint8_t part);
+  /** Initialize a exFAT partition at an explicit sector range.
+   * \param[in] dev The blockDevice for the partition.
+   * \param[in] firstSector First sector of the volume.
+   * \param[in] sectorCount Number of sectors in the volume.
+   * \return true for success or false for failure.
+   */
+  bool initAt(BlockDevice* dev, uint32_t firstSector, uint32_t sectorCount);
+  /** \return true if an I/O operation failed after initialization began. */
+  bool hasError() const {
+#if USE_EXFAT_BITMAP_CACHE
+    return m_dataCache.hasError() || m_bitmapCache.hasError();
+#else
+    return m_dataCache.hasError();
+#endif
+  }
   /**
    * Check for BlockDevice busy.
    *
@@ -128,6 +143,12 @@ class ExFatPartition {
   void printUpcase(print_t* pr);
 #endif  // DOXYGEN_SHOULD_SKIP_THIS
   //----------------------------------------------------------------------------
+ protected:
+  void invalidatePartition() {
+    m_fatType = 0;
+    m_blockDev = nullptr;
+  }
+
  private:
   /** ExFatFile allowed access to private members. */
   friend class ExFatFile;

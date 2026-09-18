@@ -33,6 +33,7 @@
 class ExFatVolume : public ExFatPartition {
  public:
   ExFatVolume() {}
+  ~ExFatVolume() {end();}
   /**
    * Initialize an FatVolume object.
    * \param[in] dev Device block driver.
@@ -41,13 +42,40 @@ class ExFatVolume : public ExFatPartition {
    * \return true for success or false for failure.
    */
   bool begin(BlockDevice* dev, bool setCwv = true, uint8_t part = 1) {
+    end();
     if (!init(dev, part)) {
+      end();
       return false;
     }
     if (!chdir()) {
+      end();
       return false;
     }
-    if (setCwv || !m_cwv) {
+    if (setCwv) {
+      m_cwv = this;
+    }
+    return true;
+  }
+  /**
+   * Initialize volume at an explicit sector range.
+   * \param[in] dev Device block driver.
+   * \param[in] firstSector First sector of the volume.
+   * \param[in] sectorCount Number of sectors in the volume.
+   * \param[in] setCwv Set current working volume if true.
+   * \return true for success or false for failure.
+   */
+  bool beginAt(BlockDevice* dev, uint32_t firstSector, uint32_t sectorCount,
+               bool setCwv = true) {
+    end();
+    if (!initAt(dev, firstSector, sectorCount)) {
+      end();
+      return false;
+    }
+    if (!chdir()) {
+      end();
+      return false;
+    }
+    if (setCwv) {
       m_cwv = this;
     }
     return true;
@@ -69,6 +97,14 @@ class ExFatVolume : public ExFatPartition {
 
   /** Change global working volume to this volume. */
   void chvol() {m_cwv = this;}
+  /** Close the working directory and end access to this volume. */
+  void end() {
+    m_vwd.close();
+    if (m_cwv == this) {
+      m_cwv = nullptr;
+    }
+    invalidatePartition();
+  }
 
   /**
    * Test for the existence of a file.

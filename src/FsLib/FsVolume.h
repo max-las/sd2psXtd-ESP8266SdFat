@@ -39,6 +39,14 @@ class FsFile;
  */
 class FsVolume {
  public:
+  /** Mount failure reason returned by initErrorCode(). */
+  enum class FsInitError {
+    OK = 0,
+    CardError = 1,
+    NoSupportedFileSystem = 2,
+    CorruptPartitionTable = 3
+  };
+
   FsVolume() {}
 
   ~FsVolume() {end();}
@@ -49,6 +57,12 @@ class FsVolume {
    * \return true for success or false for failure.
    */
   bool begin(BlockDevice* blockDev);
+  /**
+   * \return Mount failure reason from the last begin() call.
+   */
+  uint8_t initErrorCode() const {
+    return static_cast<uint8_t>(m_initError);
+  }
 #ifndef DOXYGEN_SHOULD_SKIP_THIS
   uint32_t __attribute__((error("use sectorsPerCluster()"))) blocksPerCluster();
 #endif  // DOXYGEN_SHOULD_SKIP_THIS
@@ -70,7 +84,7 @@ class FsVolume {
    * \param[in] path Path for volume working directory.
    * \return true for success or false for failure.
    */
-    bool chdir(const char* path) {
+  bool chdir(const char* path) {
     return m_fVol ? m_fVol->chdir(path) :
            m_xVol ? m_xVol->chdir(path) : false;
   }
@@ -86,11 +100,8 @@ class FsVolume {
     return m_fVol ? m_fVol->dataStartSector() :
            m_xVol ? m_xVol->clusterHeapStartSector() : 0;
   }
-  /** free dynamic memory and end access to volume */
-  void end() {
-    m_fVol = nullptr;
-    m_xVol = nullptr;
-  }
+  /** Free dynamic memory and end access to volume. */
+  void end();
   /** Test for the existence of a file in a directory
    *
    * \param[in] path Path of the file to be tested for.
@@ -379,6 +390,7 @@ class FsVolume {
   static FsVolume* m_cwv;
   FatVolume*   m_fVol = nullptr;
   ExFatVolume* m_xVol = nullptr;
-  BlockDevice* m_blockDev;
+  BlockDevice* m_blockDev = nullptr;
+  FsInitError  m_initError = FsInitError::OK;
 };
 #endif  // FsVolume_h
